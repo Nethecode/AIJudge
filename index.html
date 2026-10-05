@@ -268,14 +268,22 @@ button.danger:hover { background: #a93226; }
     color: #2ecc71;
     margin-bottom: 30px;
 }
+
+.multi-badge {
+    text-align: center;
+    color: #ff6b6b;
+    font-family: Consolas, monospace;
+    font-size: 0.85em;
+    margin-bottom: 15px;
+}
 </style>
 </head>
 <body>
 <div class="container">
     <h1>AI Judge</h1>
     <p class="subtitle">Reach 12 points to win. AI rates your answers 0–5.</p>
+    <div class="multi-badge hidden" id="multiBadge">MULTI-TEST MODE (?multi=1) — session per tab</div>
 
-    <!-- AUTH SCREEN -->
     <div id="authScreen" class="card">
         <h2>Account</h2>
         <div id="loggedOutView">
@@ -294,7 +302,6 @@ button.danger:hover { background: #a93226; }
         </div>
     </div>
 
-    <!-- PROFILE / LOBBY -->
     <div id="mainScreen" class="hidden">
         <div class="card">
             <h2>Your Profile</h2>
@@ -335,7 +342,6 @@ button.danger:hover { background: #a93226; }
         </div>
     </div>
 
-    <!-- GAME SCREEN -->
     <div id="gameScreen" class="hidden">
         <div class="card">
             <h2>Round <span id="roundNumber">1</span> · Score to win: 12</h2>
@@ -375,7 +381,6 @@ button.danger:hover { background: #a93226; }
         </div>
     </div>
 
-    <!-- JUDGE SCREEN -->
     <div id="judgeScreen" class="hidden">
         <div class="card judge-screen">
             <div class="judge-emoji">¯\_(ツ)_/¯</div>
@@ -383,7 +388,6 @@ button.danger:hover { background: #a93226; }
         </div>
     </div>
 
-    <!-- RESULTS SCREEN -->
     <div id="resultsScreen" class="hidden">
         <div class="card">
             <h2>Round Results</h2>
@@ -397,7 +401,6 @@ button.danger:hover { background: #a93226; }
         </div>
     </div>
 
-    <!-- VICTORY SCREEN -->
     <div id="victoryScreen" class="hidden">
         <div class="card victory">
             <div class="victory-title">🏆 Game Over 🏆</div>
@@ -426,7 +429,10 @@ import {
     signInWithEmailAndPassword,
     signOut,
     sendPasswordResetEmail,
-    onAuthStateChanged
+    onAuthStateChanged,
+    setPersistence,
+    browserSessionPersistence,
+    browserLocalPersistence
 } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import {
     getFirestore,
@@ -435,12 +441,7 @@ import {
     getDoc,
     updateDoc,
     deleteDoc,
-    onSnapshot,
-    collection,
-    query,
-    where,
-    getDocs,
-    serverTimestamp
+    onSnapshot
 } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -457,6 +458,14 @@ const PROXY_URL = 'https://aijudgegame.vercel.app/api/proxy';
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+
+const useMulti = new URLSearchParams(location.search).get('multi') === '1';
+setPersistence(auth, useMulti ? browserSessionPersistence : browserLocalPersistence)
+    .catch(err => console.error('Persistence error:', err));
+
+if (useMulti) {
+    document.getElementById('multiBadge').classList.remove('hidden');
+}
 
 let currentUser = null;
 let currentUsername = '';
@@ -494,8 +503,6 @@ function showScreen(id) {
     });
     if (id) $(id).classList.remove('hidden');
 }
-
-// ============ AUTH ============
 
 $('registerBtn').addEventListener('click', async () => {
     const email = $('email').value.trim();
@@ -569,8 +576,6 @@ function updateProfileUI(data) {
     const total = (data.wins || 0) + (data.losses || 0);
     $('statRate').textContent = total === 0 ? '0%' : Math.round((data.wins / total) * 100) + '%';
 }
-
-// ============ ROOMS ============
 
 $('createRoomBtn').addEventListener('click', async () => {
     const code = String(Math.floor(1000 + Math.random() * 9000));
@@ -673,8 +678,6 @@ function renderLobby() {
     else $('startGameBtn').classList.remove('hidden');
 }
 
-// ============ GAME ============
-
 $('startGameBtn').addEventListener('click', async () => {
     if (!isHost) return;
     const q = await generateQuestion();
@@ -712,18 +715,12 @@ function startTimer(seconds) {
         $('timerBar').style.width = (remaining / seconds * 100) + '%';
         if (remaining <= 0) {
             clearTimer();
-            onTimeUp();
         }
     }, 1000);
 }
 
 function clearTimer() {
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-}
-
-async function onTimeUp() {
-    if (!isHost) return;
-    // Host waits for judging trigger from handleGameState
 }
 
 function handleGameState() {
@@ -747,7 +744,6 @@ function handleGameState() {
             $('waitArea').classList.add('hidden');
         }
         renderScores();
-        // Host checks if all answered
         if (isHost && roomState.answers) {
             const players = Object.keys(roomState.players || {});
             const answered = Object.keys(roomState.answers);
@@ -837,7 +833,6 @@ ${answersText}
         return { uid: e.uid, username: e.username, answer: e.answer, score: sc };
     });
 
-    // Check victory
     let winner = null;
     Object.entries(newPlayers).forEach(([uid, p]) => {
         if ((p.score || 0) >= 12) winner = uid;
@@ -853,7 +848,6 @@ ${answersText}
 
 async function nextRound() {
     if (!isHost) return;
-    // clear answers, generate new question
     const q = await generateQuestion();
     const newRound = (roomState.round || 1) + 1;
     await updateDoc(doc(db, 'rooms', currentRoomId), {
@@ -930,45 +924,36 @@ function renderVictory() {
         tbody.appendChild(tr);
     });
 
-    // Update stats for all local players (only self)
     if (currentUser) {
-        const me = players[currentUser.uid];
         const amWinner = currentUser.uid === winnerId;
-        if (me) {
-            const updates = {
-                games: ((me.games || 0) + 1)
-            };
-            // Increment wins/losses on own profile
-            const profRef = doc(db, 'profiles', currentUser.uid);
-            getDoc(profRef).then(snap => {
-                const d = snap.data() || {};
-                updateDoc(profRef, {
-                    games: (d.games || 0) + 1,
-                    wins: (d.wins || 0) + (amWinner ? 1 : 0),
-                    losses: (d.losses || 0) + (amWinner ? 0 : 1)
-                });
+        const profRef = doc(db, 'profiles', currentUser.uid);
+        getDoc(profRef).then(snap => {
+            const d = snap.data() || {};
+            updateDoc(profRef, {
+                games: (d.games || 0) + 1,
+                wins: (d.wins || 0) + (amWinner ? 1 : 0),
+                losses: (d.losses || 0) + (amWinner ? 0 : 1)
             });
-        }
+        });
     }
 }
 
 $('backToLobbyBtn').addEventListener('click', async () => {
     if (isHost) {
+        const players = roomState.players || {};
+        const reset = {};
+        Object.entries(players).forEach(([uid, p]) => {
+            reset[uid] = { username: p.username, score: 0 };
+        });
         await updateDoc(doc(db, 'rooms', currentRoomId), {
             status: 'waiting',
             round: 0,
             question: '',
             answers: {},
             judged: null,
-            winner: null
+            winner: null,
+            players: reset
         });
-        // Reset scores
-        const players = roomState.players || {};
-        const reset = {};
-        Object.entries(players).forEach(([uid, p]) => {
-            reset[uid] = { username: p.username, score: 0 };
-        });
-        await updateDoc(doc(db, 'rooms', currentRoomId), { players: reset });
     }
     showScreen('mainScreen');
 });
