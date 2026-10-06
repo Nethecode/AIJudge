@@ -189,6 +189,15 @@ button.join-btn:hover { background: #2980b9; }
     align-items: center;
     justify-content: center;
 }
+.question-box.loading {
+    color: #888;
+    border-color: #555;
+    animation: pulse-bg 1.5s infinite;
+}
+@keyframes pulse-bg {
+    0%, 100% { background-color: #0f1626; }
+    50% { background-color: #1a2540; }
+}
 
 .timer-wrap {
     width: 100%;
@@ -244,6 +253,12 @@ button.join-btn:hover { background: #2980b9; }
 .judge-text {
     color: #aaa;
     font-size: 1.2em;
+}
+.judge-progress {
+    color: #ffcc00;
+    font-family: Consolas, monospace;
+    font-size: 0.9em;
+    margin-top: 20px;
 }
 
 .results-table {
@@ -373,7 +388,7 @@ button.join-btn:hover { background: #2980b9; }
     <div id="gameScreen" class="hidden">
         <div class="card">
             <h2>Round <span id="roundNumber">1</span> · Score to win: 12</h2>
-            <div class="question-box" id="questionBox">Loading...</div>
+            <div class="question-box loading" id="questionBox">AI is generating question...</div>
             <div class="timer-text"><span id="timerSeconds">30</span>s</div>
             <div class="timer-wrap">
                 <div class="timer-bar" id="timerBar"></div>
@@ -404,6 +419,7 @@ button.join-btn:hover { background: #2980b9; }
         <div class="card judge-screen">
             <div class="judge-emoji">¯\_(ツ)_/¯</div>
             <div class="judge-text">AI is judging your answers...</div>
+            <div class="judge-progress" id="judgeProgress">This may take 10-30 seconds with local AI</div>
         </div>
     </div>
 
@@ -457,7 +473,7 @@ const firebaseConfig = {
 };
 
 const OLLAMA_URL = 'https://26.106.44.15:8443';
-const OLLAMA_MODEL = 'llama2:latest';
+const OLLAMA_MODEL = 'gemma2:2b';
 const TIMER_SECONDS = 30;
 const SCORE_TO_WIN = 12;
 const MIN_PLAYERS = 2;
@@ -474,6 +490,8 @@ let roomsListUnsub = null;
 let roomState = null;
 let isHost = false;
 let timerInterval = null;
+let generatingQuestion = false;
+let judgingNow = false;
 
 const $ = id => document.getElementById(id);
 
@@ -489,6 +507,10 @@ async function callOllama(prompt, systemPrompt) {
         body: JSON.stringify({
             model: OLLAMA_MODEL,
             stream: false,
+            options: {
+                temperature: 0.9,
+                num_predict: 100
+            },
             messages: [
                 { role: 'system', content: systemPrompt || 'Ты полезный ассистент.' },
                 { role: 'user', content: prompt }
@@ -679,6 +701,8 @@ async function leaveRoom() {
     currentRoomId = null; roomState = null;
     $('roomArea').classList.add('hidden');
     clearTimer();
+    generatingQuestion = false;
+    judgingNow = false;
 }
 
 $('leaveRoomBtn').addEventListener('click', leaveRoom);
@@ -709,20 +733,25 @@ function renderLobby() {
 
 $('startGameBtn').addEventListener('click', async () => {
     if (!isHost) return;
-    $('questionBox').textContent = 'Generating question...';
+    // показываем "генерируем" всем — ставим статус генерирования
+    await updateDoc(doc(db, 'rooms', currentRoomId), {
+        status: 'generating_question', round: 1, question: '',
+        roundStartedAt: Date.now(), answers: {}, judged: null
+    });
     const q = await generateQuestion();
     await updateDoc(doc(db, 'rooms', currentRoomId), {
         status: 'answering', round: 1, question: q,
-        roundStartedAt: Date.now(), answers: {}, judged: null
+        roundStartedAt: Date.now()
     });
 });
 
 async function generateQuestion() {
-    const sys = 'Ты генератор коротких смешных вопросов для игры.';
-    const prompt = 'Сгенерируй один короткий смешной вопрос на русском языке, 7-20 слов. Верни только сам вопрос, без пояснений и кавычек.';
+    const sys = 'Ты генерируешь короткие смешные вопросы для игры. Отвечай только одним вопросом, без пояснений.';
+    const prompt = 'Придумай один смешной открытый вопрос на русском языке, 7-15 слов. Верни только вопрос, без кавычек.';
     try {
         const res = await callOllama(prompt, sys);
-        return res.trim().replace(/^["«]|["»]$/g, '').slice(0, 200);
+        const cleaned = res.trim().replace(/^["«]|["»]$/g, '').split('\n')[0].slice(0, 200);
+        return cleaned || 'Что бы вы взяли с собой на необитаемый остров?';
     } catch (e) {
         return 'Что бы вы взяли с собой на необитаемый остров?';
     }
@@ -752,14 +781,26 @@ function handleGameState() {
     if (s === 'waiting') {
         showScreen('mainScreen');
         clearTimer();
+        generatingQuestion = false;
+        judgingNow = false;
+    } else if (s === 'generating_question') {
+        showScreen('gameScreen');
+        $('roundNumber').textContent = roomState.round || 1;
+        $('questionBox').textContent = 'AI is generating question...';
+        $('questionBox').classList.add('loading');
+        $('answerArea').classList.add('hidden');
+        $('waitArea').classList.add('hidden');
+        renderScores();
     } else if (s === 'answering') {
         showScreen('gameScreen');
         $('roundNumber').textContent = roomState.round || 1;
         $('questionBox').textContent = roomState.question || '...';
+        $('questionBox').classList.remove('loading');
 
         const elapsed = Math.floor((Date.now() - (roomState.roundStartedAt || Date.now())) / 1000);
         const remaining = Math.max(0, TIMER_SECONDS - elapsed);
         if (remaining > 0 && !timerInterval) startTimer(remaining);
+        else if (remaining <= 0) { $('timerSeconds').textContent = '0'; $('timerBar').style.width = '0%'; }
 
         const myAnswer = roomState.answers && roomState.answers[currentUser.uid];
         if (myAnswer) {
@@ -772,11 +813,12 @@ function handleGameState() {
         }
         renderScores();
 
-        if (isHost && roomState.answers) {
+        if (isHost && roomState.answers && !judgingNow) {
             const players = Object.keys(roomState.players || {});
             const answered = Object.keys(roomState.answers);
             if (answered.length === players.length && players.length >= MIN_PLAYERS) {
                 clearTimer();
+                judgingNow = true;
                 triggerJudging();
             }
         }
@@ -786,7 +828,10 @@ function handleGameState() {
     } else if (s === 'results') {
         showScreen('resultsScreen');
         renderResults();
-        setTimeout(() => { if (isHost) nextRound(); }, 6000);
+        judgingNow = false;
+        if (isHost) {
+            setTimeout(() => { nextRound(); }, 6000);
+        }
     } else if (s === 'finished') {
         showScreen('victoryScreen');
         renderVictory();
@@ -820,8 +865,8 @@ async function judgeAnswers() {
     }));
 
     const answersText = entries.map((e, i) => (i+1) + '. ' + e.username + ': "' + (e.answer || '(no answer)') + '"').join('\n');
-    const sys = 'Ты строгий судья. Оцениваешь ответы от 0 до 5. Отвечай ТОЛЬКО валидным JSON.';
-    const prompt = 'Вопрос: "' + roomState.question + '"\n\nОцени каждый ответ от 0 до 5:\n0 — нет ответа\n1 — ужасный\n2 — с ошибками\n3 — обычный\n4 — хороший\n5 — идеальный\n\nОтветы:\n' + answersText + '\n\nВерни ТОЛЬКО JSON: {"scores":[числа], "reason":"краткое объяснение на русском"}';
+    const sys = 'Ты строгий судья. Отвечай ТОЛЬКО валидным JSON без пояснений.';
+    const prompt = 'Вопрос: "' + roomState.question + '"\nОцени ответы от 0 до 5 (0 — нет, 1 — ужас, 2 — плохо, 3 — норм, 4 — хорошо, 5 — идеал).\n' + answersText + '\nВерни JSON: {"scores":[числа], "reason":"на русском"}';
 
     let scores = entries.map(() => 0);
     let reason = '';
@@ -859,11 +904,15 @@ async function judgeAnswers() {
 
 async function nextRound() {
     if (!isHost) return;
-    const q = await generateQuestion();
     const newRound = (roomState.round || 1) + 1;
     await updateDoc(doc(db, 'rooms', currentRoomId), {
-        status: 'answering', round: newRound, question: q,
+        status: 'generating_question', round: newRound, question: '',
         roundStartedAt: Date.now(), answers: {}, judged: null
+    });
+    const q = await generateQuestion();
+    await updateDoc(doc(db, 'rooms', currentRoomId), {
+        status: 'answering', round: newRound, question: q,
+        roundStartedAt: Date.now()
     });
 }
 
