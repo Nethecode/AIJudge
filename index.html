@@ -796,7 +796,7 @@ function renderResults() {
         const tr = document.createElement('tr');
         if (r.score === maxScore && maxScore > 0) tr.classList.add('winner');
         const td1 = document.createElement('td');
-        td1.innerHTML = '<span class="uname" style="background:#ffcc00;color:#000;padding:3px 10px;border-radius:4px;font-weight:bold;">' + r.username + '</span>';
+        td1.innerHTML = '<span style="background:#ffcc00;color:#000;padding:3px 10px;border-radius:4px;font-weight:bold;">' + r.username + '</span>';
         const td2 = document.createElement('td');
         td2.textContent = r.answer || '(no answer)';
         const td3 = document.createElement('td');
